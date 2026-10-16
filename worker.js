@@ -11,9 +11,14 @@ export default {
       return Response.json({ ok: true, service: "blockworld-multiplayer", version: 1 });
     }
     if (url.pathname !== "/ws") {
+      // Let Cloudflare Assets serve the actual game (index.html, CSS, JS and embedded models).
+      // This fallback matters if the route is configured to run the Worker before static assets.
+      if (env.ASSETS && typeof env.ASSETS.fetch === "function") {
+        return env.ASSETS.fetch(request);
+      }
       return new Response(
-        "Blockworld Multiplayer Worker\nEndpoints: GET /health, WebSocket /ws?room=world1",
-        { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } }
+        "Blockworld Multiplayer Worker\nEndpoints: static game assets, GET /health, WebSocket /ws?room=main",
+        { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } }
       );
     }
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -62,7 +67,7 @@ export class GameRoom extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  webSocketMessage(ws, message) {
+  async webSocketMessage(ws, message) {
     const raw = typeof message === "string"
       ? message
       : message instanceof ArrayBuffer
@@ -96,6 +101,8 @@ export class GameRoom extends DurableObject {
         roomSize: this.ctx.getWebSockets().length,
         players: this.playersExcept(session.id)
       });
+      // Replay persisted block edits so newly joined players receive the current room terrain.
+      await this.sendBlockSnapshot(ws);
       this.broadcast({ type: "player_joined", player: this.toPlayer(session) }, ws);
       return;
     }
@@ -115,6 +122,20 @@ export class GameRoom extends DurableObject {
       this.sessions.set(ws, session);
       ws.serializeAttachment(session);
       this.broadcast({ type: "player_update", player: this.toPlayer(session) }, ws);
+      return;
+    }
+
+    if (packet.type === "block_edit") {
+      const edit = this.cleanBlockEdit(packet.edit);
+      if (!edit) {
+        this.send(ws, { type: "error", message: "Invalid block edit" });
+        return;
+      }
+      // Each room owns its own durable map edits. Last edit to a coordinate wins.
+      const key = `block:${edit.dimension}:${edit.x},${edit.y},${edit.z}`;
+      await this.ctx.storage.put(key, edit);
+      // Do not echo back to the author; they have already applied the edit locally.
+      this.broadcast({ type: "block_edit", edit, by: session.id }, ws);
       return;
     }
 
@@ -140,6 +161,34 @@ export class GameRoom extends DurableObject {
     if (session?.id) this.broadcast({ type: "player_left", id: session.id });
   }
 
+  cleanBlockEdit(value) {
+    if (!value || typeof value !== "object") return null;
+    const integer = (v, min, max) => Number.isSafeInteger(Number(v)) && Number(v) >= min && Number(v) <= max ? Number(v) : null;
+    const x = integer(value.x, -100000, 100000);
+    const y = integer(value.y, 0, 255);
+    const z = integer(value.z, -100000, 100000);
+    const id = integer(value.id, 0, 65535);
+    const dimension = ["overworld", "nether", "end", "fortnite"].includes(value.dimension) ? value.dimension : null;
+    if ([x, y, z, id].some(v => v === null) || !dimension) return null;
+    return { x, y, z, id, dimension };
+  }
+
+  async sendBlockSnapshot(ws) {
+    try {
+      const saved = await this.ctx.storage.list({ prefix: "block:" });
+      const edits = [];
+      for (const value of saved.values()) {
+        if (value && typeof value === "object") edits.push(value);
+      }
+      // Small batches keep WebSocket messages compact even for a heavily edited world.
+      for (let i = 0; i < edits.length; i += 24) {
+        this.send(ws, { type: "block_snapshot", edits: edits.slice(i, i + 24) });
+      }
+    } catch (err) {
+      this.send(ws, { type: "error", message: "Could not load saved block edits" });
+    }
+  }
+
   cleanName(value) {
     const name = typeof value === "string" ? value.replace(/[<>\r\n]/g, "").trim().slice(0, 18) : "";
     return name || "Player";
@@ -163,7 +212,8 @@ export class GameRoom extends DurableObject {
       pitch,
       mode: value.mode === "creative" ? "creative" : "survival",
       vehicle: value.vehicle === true,
-      elytra: value.elytra === true
+      elytra: value.elytra === true,
+      dimension: ['overworld', 'nether', 'end', 'fortnite'].includes(value.dimension) ? value.dimension : 'overworld'
     };
   }
 
