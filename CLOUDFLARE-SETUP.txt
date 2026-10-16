@@ -1,0 +1,23 @@
+BLOCKWORLD MULTIPLAYER SERVER
+
+Files:
+- worker.js: Cloudflare Worker + Durable Object WebSocket room server
+- wrangler.toml: Cloudflare deployment configuration
+- blockworld-real-life-physics-cars-elytra-cloudflare.html: the game with cars, elytra, and multiplayer client panel
+
+Deploy the server:
+1. Put worker.js and wrangler.toml in the same folder.
+2. Open a terminal in that folder and run: npx wrangler login
+3. Run: npx wrangler deploy
+4. Cloudflare will print the Worker URL, for example https://blockworld-multiplayer.<your-subdomain>.workers.dev
+5. Open the HTML game, click Multiplayer, paste the Worker URL, choose the same room name on both players, set a name, and click Connect.
+
+The client converts https:// to wss:// and connects to /ws?room=<room> automatically.
+The /health endpoint returns JSON so you can check if the Worker is deployed.
+
+Gameplay:
+- In Creative inventory, search for “Driveable Car” or “Elytra”, then put it in the hotbar.
+- Select Driveable Car and right-click to spawn and enter it. W/S drive, A/D steer, Shift exits.
+- Select Elytra and right-click to equip/unequip. Jump into the air to glide; look up for lift and down to dive.
+
+Multiplayer currently synchronizes player positions, facing direction, names, and whether each player is driving a car. It does not yet synchronize terrain/block edits, mob states, inventories, or save files. Use the same room name to join the same match.
